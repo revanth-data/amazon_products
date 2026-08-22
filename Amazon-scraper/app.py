@@ -32,14 +32,38 @@ st.caption("Scrape 50 to 100 products across pages to capture both Actual Search
 
 
 # --- PLAYWRIGHT SCRAPER TASK ---
+# def run_playwright_scraper(search_query, target_count=50):
+#     asins_meta = []  # Stores dicts with metadata discovered from search pages
+#     all_competitor_data = []
+
+#     with Stealth().use_sync(sync_playwright()) as p:
+#         browser = p.chromium.launch(
+#             headless=True,
+#             args=["--disable-blink-features=AutomationControlled", "--start-maximized"]
+#         )
+
+#         context = browser.new_context(
+#             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+#             viewport={"width": 1920, "height": 1080},
+#             locale="en-IN"
+#         )
+
+# --- UPDATE THIS SECTION IN YOUR app.py ---
 def run_playwright_scraper(search_query, target_count=50):
-    asins_meta = []  # Stores dicts with metadata discovered from search pages
+    asins_meta = []
     all_competitor_data = []
 
-    with Stealth().use_sync(sync_playwright()) as p:
+    with sync_playwright() as p:
+        # Pass required sandbox and memory flags for Linux cloud hosting
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--start-maximized"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+            ]
         )
 
         context = browser.new_context(
@@ -47,6 +71,7 @@ def run_playwright_scraper(search_query, target_count=50):
             viewport={"width": 1920, "height": 1080},
             locale="en-IN"
         )
+        
 
         page = context.new_page()
 
