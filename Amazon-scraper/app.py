@@ -332,20 +332,16 @@
 #         )
 
 
-
 import csv
-import os
+import json
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
+import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-
-# Auto-install Playwright browser binaries if missing on server
-os.system("playwright install chromium")
 
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(
@@ -357,114 +353,106 @@ st.set_page_config(
 st.title("🛒 Amazon India Multi-Page Rank & SEO Intelligence")
 st.caption("Scrape products across pages to capture both Actual Search Order and Pure Organic SEO Ranks.")
 
+# Rotation of Realistic User Agents to prevent blocking
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+]
 
-# --- PLAYWRIGHT SCRAPER FUNCTION ---
-def run_playwright_scraper(search_query, target_count=50):
+def get_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/",
+    }
+
+# --- LIGHTWEIGHT HTTP SCRAPER FUNCTION ---
+def run_http_scraper(search_query, target_count=50):
     asins_meta = []
     all_competitor_data = []
 
-    with sync_playwright() as p:
-        # Launch Chromium with Linux cloud container compatibility flags
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
+    current_page = 1
+    seen_asins = set()
+    overall_rank_counter = 1
+    organic_seo_counter = 1
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="en-IN"
-        )
+    session = requests.Session()
+    status_text = st.empty()
 
-        page = context.new_page()
-
-        # Phase 1: Search Page Pagination
-        current_page = 1
-        seen_asins = set()
-        overall_rank_counter = 1
-        organic_seo_counter = 1
-
-        status_text = st.empty()
-
-        while len(asins_meta) < target_count and current_page <= 5:
-            status_text.text(f"Scanning Search Page {current_page}...")
-            url = f"https://www.amazon.in/s?k={search_query.replace(' ', '+')}&page={current_page}"
-            
-            try:
-                page.goto(url, wait_until="domcontentloaded")
-                
-                for _ in range(3):
-                    page.evaluate("window.scrollBy(0, 800)")
-                    time.sleep(0.5)
-
-                time.sleep(random.uniform(2, 3))
-                soup = BeautifulSoup(page.content(), "html.parser")
-                
-                cards_found_on_page = 0
-                for card in soup.select("div[data-asin]"):
-                    asin = card.get("data-asin")
-                    if asin and len(asin) == 10 and asin not in seen_asins:
-                        seen_asins.add(asin)
-                        cards_found_on_page += 1
-
-                        card_str = str(card)
-                        is_sponsored = False
-                        if (
-                            card.select_one(".puis-sponsored-label-text, .s-sponsored-label-info-icon, .s-shopping-ad-attribute")
-                            or "sponsored" in card_str.lower()
-                            or "s-shopping-ad" in card_str.lower()
-                        ):
-                            is_sponsored = True
-
-                        if is_sponsored:
-                            organic_rank = "N/A (Paid Ad)"
-                            placement_label = "Sponsored Ad"
-                        else:
-                            organic_rank = organic_seo_counter
-                            placement_label = "Organic Result"
-                            organic_seo_counter += 1
-
-                        asins_meta.append({
-                            "ASIN": asin,
-                            "Overall_Page_Rank": overall_rank_counter,
-                            "Organic_SEO_Rank": organic_rank,
-                            "Placement_Type": placement_label,
-                            "Search_Page_Num": current_page
-                        })
-
-                        overall_rank_counter += 1
-                        if len(asins_meta) >= target_count:
-                            break
-
-                if cards_found_on_page == 0:
-                    break
-
-                current_page += 1
-
-            except Exception as e:
-                st.error(f"Error fetching page {current_page}: {e}")
+    # Phase 1: Search Page Pagination
+    while len(asins_meta) < target_count and current_page <= 5:
+        status_text.text(f"Scanning Search Page {current_page}...")
+        url = f"https://www.amazon.in/s?k={search_query.replace(' ', '+')}&page={current_page}"
+        
+        try:
+            response = session.get(url, headers=get_headers(), timeout=10)
+            if response.status_code != 200:
+                st.warning(f"Page {current_page} returned HTTP {response.status_code}. Stopping pagination.")
                 break
 
-        # Phase 2: Product Detail Scraping
-        progress_bar = st.progress(0)
+            soup = BeautifulSoup(response.content, "html.parser")
+            cards_found_on_page = 0
 
-        for idx, item in enumerate(asins_meta, 1):
-            asin = item["ASIN"]
-            status_text.text(f"Extracting product details {idx} of {len(asins_meta)} (ASIN: {asin})...")
-            prod_url = f"https://www.amazon.in/dp/{asin}"
+            for card in soup.select("div[data-asin]"):
+                asin = card.get("data-asin")
+                if asin and len(asin) == 10 and asin not in seen_asins:
+                    seen_asins.add(asin)
+                    cards_found_on_page += 1
 
-            try:
-                page.goto(prod_url, wait_until="domcontentloaded")
-                page.evaluate("window.scrollBy(0, 500)")
-                time.sleep(random.uniform(1.5, 2.5))
+                    card_str = str(card)
+                    is_sponsored = False
+                    if (
+                        card.select_one(".puis-sponsored-label-text, .s-sponsored-label-info-icon, .s-shopping-ad-attribute")
+                        or "sponsored" in card_str.lower()
+                        or "s-shopping-ad" in card_str.lower()
+                    ):
+                        is_sponsored = True
 
-                prod_soup = BeautifulSoup(page.content(), "html.parser")
+                    if is_sponsored:
+                        organic_rank = "N/A (Paid Ad)"
+                        placement_label = "Sponsored Ad"
+                    else:
+                        organic_rank = organic_seo_counter
+                        placement_label = "Organic Result"
+                        organic_seo_counter += 1
+
+                    asins_meta.append({
+                        "ASIN": asin,
+                        "Overall_Page_Rank": overall_rank_counter,
+                        "Organic_SEO_Rank": organic_rank,
+                        "Placement_Type": placement_label,
+                        "Search_Page_Num": current_page
+                    })
+
+                    overall_rank_counter += 1
+                    if len(asins_meta) >= target_count:
+                        break
+
+            if cards_found_on_page == 0:
+                break
+
+            current_page += 1
+            time.sleep(random.uniform(1.0, 2.0))
+
+        except Exception as e:
+            st.error(f"Error fetching page {current_page}: {e}")
+            break
+
+    # Phase 2: Product Detail Extraction
+    progress_bar = st.progress(0)
+
+    for idx, item in enumerate(asins_meta, 1):
+        asin = item["ASIN"]
+        status_text.text(f"Extracting product details {idx} of {len(asins_meta)} (ASIN: {asin})...")
+        prod_url = f"https://www.amazon.in/dp/{asin}"
+
+        try:
+            prod_resp = session.get(prod_url, headers=get_headers(), timeout=10)
+            if prod_resp.status_code == 200:
+                prod_soup = BeautifulSoup(prod_resp.content, "html.parser")
 
                 title = prod_soup.select_one("#productTitle")
                 rating = prod_soup.select_one("i.a-icon-star span")
@@ -475,7 +463,6 @@ def run_playwright_scraper(search_query, target_count=50):
 
                 mrp_val = "N/A"
                 mrp_el = prod_soup.select_one("span.a-basisPrice span.a-offscreen, .a-text-price[data-a-strike='true'] span.a-offscreen")
-
                 if mrp_el:
                     mrp_val = mrp_el.text.replace("₹", "").replace(",", "").strip()
 
@@ -507,14 +494,15 @@ def run_playwright_scraper(search_query, target_count=50):
                     "Technical_Specifications": specs
                 })
 
-            except Exception as e:
-                st.warning(f"Failed to scrape ASIN {asin}: {e}")
+            time.sleep(random.uniform(0.5, 1.2))
 
-            progress_bar.progress(idx / len(asins_meta))
+        except Exception as e:
+            st.warning(f"Failed to fetch details for ASIN {asin}: {e}")
 
-        browser.close()
-        status_text.text("Extraction completed successfully!")
-        progress_bar.empty()
+        progress_bar.progress(idx / len(asins_meta))
+
+    status_text.text("Extraction completed successfully!")
+    progress_bar.empty()
 
     return all_competitor_data
 
@@ -571,10 +559,7 @@ if start_btn:
         st.error("Please enter a valid search keyword.")
     else:
         st.info(f"Extracting top **{target_count}** products for **'{search_query}'**...")
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(run_playwright_scraper, search_query, target_count)
-            raw_data = future.result()
+        raw_data = run_http_scraper(search_query, target_count)
 
         if raw_data:
             df = process_json_to_df(raw_data)
